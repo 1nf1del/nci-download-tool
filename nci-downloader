@@ -1,0 +1,110 @@
+#!/usr/bin/env python
+
+import os
+import yaml
+import urllib
+import shutil
+import tempfile
+import argparse
+import subprocess
+
+from glob import glob
+
+def which(cmd):
+    cmd = ["which",cmd]
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+    res = p.stdout.readline().rstrip()
+    if len(res) == 0: return None
+    return res
+
+def run_index(bam_path):
+    print "Indexing BAM"
+    cmd = [which("samtools"), "index", bam_path]
+    proc = subprocess.Popen(cmd)
+    stdout, stderr = proc.communicate()
+
+
+def s3_downloader(args, config):
+    
+    env = os.environ
+    env['AWS_ACCESS_KEY_ID'] = config['aws_access_key_id']
+    env['AWS_SECRET_ACCESS_KEY'] = config['aws_secret_access_key']
+    cmd = [which("aws"), "s3", "ls", "s3://%s/%s/" % (config['bucket'], args.uuid), "--endpoint-url", config['endpoint']]
+    print "running", cmd
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, env=env )
+    stdout, stderr = proc.communicate()
+    found = None
+    for line in stdout.split("\n"):
+        tmp = line.split(" ")
+        if len(tmp) > 2 and tmp[3].endswith(".bam"):
+            found = tmp[3]
+    if found:
+        tdir = tempfile.mkdtemp(dir=args.workdir, prefix="nci_download_")
+        cmd = [which("aws"), "s3", "cp", "s3://%s/%s" % (config['bucket'], urllib.unquote(found)), tdir, "--endpoint-url", config['endpoint']]
+        print "Running", cmd
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, env=env )
+        stdout, stderr = proc.communicate()
+        if proc.returncode != 0:
+            print "Download Failure"
+            shutil.rmtree(tdir)
+            return None
+        
+        o = glob(os.path.join(tdir, "*.bam"))
+        outpath = os.path.join(args.outdir, os.path.basename(o[0]))
+        shutil.move(o[0], outpath)
+        if os.path.exists(o[0] + ".bai"):
+            shutil.move(o[0] + ".bai", outpath + ".bai")
+        else:
+            run_index(outpath)
+        shutil.rmtree(tdir)
+        return outpath
+    return None
+
+
+def gdc_downloader(args, config):
+    tdir = tempfile.mkdtemp(dir=args.workdir, prefix="nci_download_")
+    with open("gdc-token", "w") as handle:
+        handle.write(config['token'])
+    cmd = [which("gdc-client"), "download", "-t", "gdc-token", "-n", args.nthreads, "-d", tdir, args.uuid]
+    print "running", cmd
+    proc = subprocess.Popen(cmd)
+    stdout, stderr = proc.communicate()
+    if proc.returncode != 0:
+        print "Download failure" 
+        return None
+    o = glob(os.path.join(tdir, args.uuid, "*.bam"))
+    outpath= os.path.join(args.outdir, os.path.basename(o[0]))
+    shutil.move(o[0], outpath)
+    if os.path.exists(o[0] + ".bai"):
+        shutil.move(o[0] + ".bai", outpath +".bai")
+    else:
+        run_index(outpath)
+    shutil.rmtree(tdir)
+    return outpath
+
+
+method_map = {
+    "s3" : s3_downloader,
+    "gdc" : gdc_downloader
+}
+
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    
+    parser.add_argument("config")
+    parser.add_argument("uuid")
+    parser.add_argument("--workdir", default="./")
+    parser.add_argument("--outdir", default="./")
+    parser.add_argument("--nthreads", default="20")
+
+    args = parser.parse_args()
+
+    with open(args.config) as handle:
+        config = yaml.load(handle.read())
+
+    for method in config:
+        if method['method'] in method_map:
+            if method_map[method['method']]( args, method ):
+                break
