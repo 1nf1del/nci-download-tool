@@ -1,11 +1,14 @@
 #!/usr/bin/env python
 
+import sys
 import os
 import yaml
+import json
 import urllib
 import shutil
 import tempfile
 import argparse
+import urllib
 import subprocess
 
 from glob import glob
@@ -24,12 +27,12 @@ def run_index(bam_path):
     stdout, stderr = proc.communicate()
 
 
-def s3_downloader(args, config):
+def s3_downloader(args, uuid, config):
     
     env = os.environ
     env['AWS_ACCESS_KEY_ID'] = config['aws_access_key_id']
     env['AWS_SECRET_ACCESS_KEY'] = config['aws_secret_access_key']
-    cmd = [which("aws"), "s3", "ls", "s3://%s/%s/" % (config['bucket'], args.uuid), "--endpoint-url", config['endpoint']]
+    cmd = [which("aws"), "s3", "ls", "s3://%s/%s/" % (config['bucket'], uuid), "--endpoint-url", config['endpoint']]
     print "running", cmd
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, env=env )
     stdout, stderr = proc.communicate()
@@ -61,18 +64,20 @@ def s3_downloader(args, config):
     return None
 
 
-def gdc_downloader(args, config):
+def gdc_downloader(args, uuid, config):
+    if which("gdc-client") is None:
+        return None
     tdir = tempfile.mkdtemp(dir=args.workdir, prefix="nci_download_")
     with open("gdc-token", "w") as handle:
         handle.write(config['token'])
-    cmd = [which("gdc-client"), "download", "-t", "gdc-token", "-n", args.nthreads, "-d", tdir, args.uuid]
+    cmd = [which("gdc-client"), "download", "-t", "gdc-token", "-n", args.nthreads, "-d", tdir, uuid]
     print "running", cmd
     proc = subprocess.Popen(cmd)
     stdout, stderr = proc.communicate()
     if proc.returncode != 0:
         print "Download failure" 
         return None
-    o = glob(os.path.join(tdir, args.uuid, "*.bam"))
+    o = glob(os.path.join(tdir, uuid, "*.bam"))
     outpath= os.path.join(args.outdir, os.path.basename(o[0]))
     shutil.move(o[0], outpath)
     if os.path.exists(o[0] + ".bai"):
@@ -89,22 +94,47 @@ method_map = {
 }
 
 
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     
     parser.add_argument("config")
     parser.add_argument("uuid")
+    parser.add_argument("--legacy", action="store_true", default=False)
     parser.add_argument("--workdir", default="./")
     parser.add_argument("--outdir", default="./")
     parser.add_argument("--nthreads", default="20")
 
     args = parser.parse_args()
 
+    uuids = [args.uuid]
+    if args.legacy:
+        base_url = "https://gdc-api.nci.nih.gov/legacy/files"
+        q = {
+            "op":"=",
+            "content":{
+                "field":"file.submitter_id",
+                "value":[
+                    args.uuid
+                ]
+            }
+        }
+        url = base_url + "?" + urllib.urlencode({"filters" : json.dumps(q)})
+        res = urllib.urlopen(url).read()
+        data = json.loads(res)
+        if len(data['data']['hits']):
+            uuids.append( data['data']['hits'][0]['file_id'] )
+
     with open(args.config) as handle:
         config = yaml.load(handle.read())
 
+    found = False
     for method in config:
         if method['method'] in method_map:
-            if method_map[method['method']]( args, method ):
-                break
+            for u in uuids:
+                if method_map[method['method']]( args, u, method ):
+                    found = True
+                    break
+
+    if not found:
+        sys.exit(1)
+    sys.exit(0)
