@@ -78,6 +78,9 @@ def gdc_downloader(args, uuid, config):
         print "Download failure" 
         return None
     o = glob(os.path.join(tdir, uuid, "*.bam"))
+    if len(o) == 0:
+        print "No Download Found"
+        returnn None
     outpath= os.path.join(args.outdir, os.path.basename(o[0]))
     shutil.move(o[0], outpath)
     if os.path.exists(o[0] + ".bai"):
